@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>three.js webgl - shaders - ocean</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+    <link type="text/css" rel="stylesheet" href="main.css">
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="container"></div>
+    <div id="info">
+        <a>Touch the screen</a>
+        <br>Colin Keenan, 2024; Based on 'webgl ocean demo' by MrDoob (https://github.com/mrdoob)
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "./three.module.js",
+                "three/addons/": "./"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from './three.module.js';
+        import Stats from './stats.module.js';
+        import { Water } from './Water.js';
+        import { Sky } from './Sky.js';
+        import { FontLoader } from './FontLoader.js';
+        import { TextGeometry } from './TextGeometry.js';
+        import { RGBELoader } from './RGBELoader.js';
+
+        let container, stats;
+        let camera, scene, renderer;
+        let water, sun, mesh, textMesh, hdrEquirect;
+        let sky, skyUniforms, pmremGenerator, sceneEnv, renderTarget;
+
+        const params = {
+            transmission: 1,
+            opacity: 0.1,
+            metalness: 0.1,
+            roughness: 0,
+            ior: 2,
+            thickness: 0.01,
+            attenuationColor: 0xcc0000,
+            attenuationDistance: 1,
+            specularIntensity: 1,
+            specularColor: 0xcc0000,
+            envMapIntensity: 1,
+            lightIntensity: 1,
+            exposure: 1,
+            elevation: .75,
+            azimuth: -172.5,
+            distortionScale: 2,
+            size: 1
+        };
+
+        // Define your brand colors
+        const brandColors = [
+            new THREE.Color(0xcc0000),  // Wolfpack Red
+            new THREE.Color(0x000000),  // Wolfpack Black
+            new THREE.Color(0xffffff),  // Wolfpack White
+            new THREE.Color(0xd14905),  // Pyroman Flame
+            new THREE.Color(0x990000),  // Reynolds Red
+            new THREE.Color(0xfac800),  // Hunt Yellow
+            new THREE.Color(0x6f7d1c),  // Genomic Green
+            new THREE.Color(0x008473),  // Carmichael Aqua
+            new THREE.Color(0x427e93),  // Innovation Blue
+            new THREE.Color(0x4156a1)   // Bio-Indigo
+        ];
+
+        // Function to randomly pick a brand color with slight variation
+        function getRandomBrandColor() {
+            const baseColor = brandColors[Math.floor(Math.random() * brandColors.length)];
+            
+            // Add a slight random variation to the selected color to avoid flat appearance
+            const variation = 0.1;  // Adjust this value to control the amount of variation
+            const r = Math.min(Math.max(baseColor.r + (Math.random() * variation - variation / 2), 0), 1);
+            const g = Math.min(Math.max(baseColor.g + (Math.random() * variation - variation / 2), 0), 1);
+            const b = Math.min(Math.max(baseColor.b + (Math.random() * variation - variation / 2), 0), 1);
+            
+            return new THREE.Color(r, g, b);
+        }
+
+        function updateSun() {
+            const phi = THREE.MathUtils.degToRad(90 - params.elevation);
+            const theta = THREE.MathUtils.degToRad(params.azimuth);
+
+            sun.setFromSphericalCoords(1, phi, theta);
+
+            sky.material.uniforms['sunPosition'].value.copy(sun);
+            water.material.uniforms['sunDirection'].value.copy(sun).normalize();
+
+            if (renderTarget !== undefined) renderTarget.dispose();
+
+            sceneEnv.add(sky);
+            renderTarget = pmremGenerator.fromScene(sceneEnv);
+            scene.add(sky);
+
+            scene.environment = renderTarget.texture;
+        }
+
+        function init() {
+            container = document.getElementById('container');
+
+            renderer = new THREE.WebGLRenderer();
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.toneMapping = THREE.ACESFilmicToneMapping;
+            renderer.toneMappingExposure = 1;
+            container.appendChild(renderer.domElement);
+
+            scene = new THREE.Scene();
+
+            camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 1, 20000);
+            camera.position.set(30, 30, 100);
+
+            sun = new THREE.Vector3();
+
+            const waterGeometry = new THREE.PlaneGeometry(10000, 10000);
+
+            water = new Water(
+                waterGeometry,
+                {
+                    textureWidth: 512,
+                    textureHeight: 512,
+                    waterNormals: new THREE.TextureLoader().load('https://cdn.glitch.global/1ccf898d-1694-4923-b113-bba41281e075/waternormals.jpg?v=1717467621168', function (texture) {
+                        texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+                    }),
+                    sunDirection: new THREE.Vector3(),
+                    sunColor: 0xffffff,
+                    waterColor: 0x001e0f,
+                    distortionScale: params.distortionScale,
+                    fog: scene.fog !== undefined
+                }
+            );
+
+            water.rotation.x = -Math.PI / 2;
+            scene.add(water);
+
+            sky = new Sky();
+            sky.scale.setScalar(10000);
+            scene.add(sky);
+
+            skyUniforms = sky.material.uniforms;
+
+            skyUniforms['turbidity'].value = 20;
+            skyUniforms['rayleigh'].value = 2;
+            skyUniforms['mieCoefficient'].value = 0.005;
+            skyUniforms['mieDirectionalG'].value = 0.8;
+
+            pmremGenerator = new THREE.PMREMGenerator(renderer);
+            sceneEnv = new THREE.Scene();
+
+            updateSun();
+
+            hdrEquirect = new RGBELoader()
+                .setPath('textures/equirectangular/')
+                .load('royal_esplanade_1k.hdr', function () {
+                    hdrEquirect.mapping = THREE.EquirectangularReflectionMapping;
+                    scene.environment = hdrEquirect;
+                });
+
+            const cubeGeometry = new THREE.BoxGeometry(30, 30, 30);
+            const cubeMaterial = new THREE.MeshPhysicalMaterial({
+                color: 0xffffff,
+                transmission: params.transmission,
+                opacity: params.opacity,
+                metalness: params.metalness,
+                roughness: params.roughness,
+                ior: params.ior,
+                thickness: params.thickness,
+                attenuationColor: getRandomBrandColor(),
+                attenuationDistance: params.attenuationDistance,
+                specularIntensity: params.specularIntensity,
+                specularColor: getRandomBrandColor(),
+                envMapIntensity: params.envMapIntensity
+            });
+
+            mesh = new THREE.Mesh(cubeGeometry, cubeMaterial);
+            mesh.position.z = -25; // Set the cube 25 units back in the z-axis
+            scene.add(mesh);
+
+            const loader = new FontLoader();
+            loader.load('https://threejs.org/examples/fonts/helvetiker_regular.typeface.json', function (font) {
+                // Existing "THE LANDING" text
+                const textGeometryLanding = new TextGeometry('THE LANDING', {
+                    font: font,
+                    size: 30,
+                    depth: 1,
+                    curveSegments: 12,
+                    bevelEnabled: true,
+                    bevelThickness: 1,
+                    bevelSize: 0.5,
+                    bevelOffset: 0,
+                    bevelSegments: 5
+                });
+                const textMaterialLanding = new THREE.MeshStandardMaterial({ color: 0xffffff });
+                textMesh = new THREE.Mesh(textGeometryLanding, textMaterialLanding);
+                textMesh.position.set(-80, 2.5, 0); 
+                scene.add(textMesh);
+
+                // New "Take a break in..." text
+                const textGeometryBreak = new TextGeometry('Take a break in . . .', {
+                    font: font,
+                    size: 8,  // 50% of the size of "THE LANDING"
+                    depth: 1,
+                    curveSegments: 12,
+                    bevelEnabled: true,
+                    bevelThickness: 1,
+                    bevelSize: 0.5,
+                    bevelOffset: 0,
+                    bevelSegments: 5
+                });
+
+                // Use the same material as the cube
+                const textMeshBreak = new THREE.Mesh(textGeometryBreak, cubeMaterial);
+                textMeshBreak.position.set(-40, 40, 0);  // Centered horizontally above "THE LANDING"
+                scene.add(textMeshBreak);
+            });
+
+            stats = new Stats();
+            container.appendChild(stats.dom);
+
+            window.addEventListener('resize', onWindowResize);
+            window.addEventListener('click', randomizeParameters);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            render();
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            render();
+            stats.update();
+        }
+
+        function render() {
+            const time = performance.now() * 0.001;
+            mesh.position.y = Math.sin(time) * 20 + 5;
+            mesh.rotation.x = time * 0.5;
+            mesh.rotation.z = time * 0.51;
+            water.material.uniforms['time'].value += 1.0 / 60.0;
+            renderer.render(scene, camera);
+        }
+
+        function randomizeParameters() {
+            params.transmission = Math.random();
+            params.opacity = .00125 * Math.random();
+            params.metalness = 0.5 + 0.5 * Math.random();  // Increase the range of metalness
+            params.roughness = 0.05 * Math.random();  // Decrease roughness for sharper reflections
+            params.ior = 2 + Math.random();
+            params.thickness = .01 * Math.random();
+            
+            // Use the brand color with slight variation
+            params.attenuationColor = getRandomBrandColor();
+            params.specularColor = getRandomBrandColor();
+            
+            params.attenuationDistance = Math.random();
+            params.specularIntensity = 0.75 + 0.25 * Math.random();  // Increase specular intensity
+            params.envMapIntensity = 0.75 + 0.25 * Math.random();  // Boost environment map intensity
+            params.exposure = 1.5 + 0.5 * Math.random();  // Slightly increase exposure
+            
+            params.elevation = 3.14 * Math.random() - 2;
+            params.azimuth = -172.5;
+            params.distortionScale = 2 * Math.random() + 1;  // Adjust distortion for more variability
+            params.size = 5 * Math.random() + 0.5;
+
+            // Apply the updated parameters to the material
+            mesh.material.transmission = params.transmission;
+            mesh.material.opacity = params.opacity;
+            mesh.material.metalness = params.metalness;
+            mesh.material.roughness = params.roughness;
+            mesh.material.ior = params.ior;
+            mesh.material.thickness = params.thickness;
+            mesh.material.attenuationColor = params.attenuationColor;
+            mesh.material.attenuationDistance = params.attenuationDistance;
+            mesh.material.specularIntensity = params.specularIntensity;
+            mesh.material.specularColor = params.specularColor;
+            mesh.material.envMapIntensity = params.envMapIntensity;
+
+            renderer.toneMappingExposure = params.exposure;
+
+            water.material.uniforms['distortionScale'].value = params.distortionScale;
+            water.material.uniforms['size'].value = params.size;
+
+            updateSun();
+
+            render();
+        }
+
+        init();
+        animate();
+    </script>
+</body>
+</html>
